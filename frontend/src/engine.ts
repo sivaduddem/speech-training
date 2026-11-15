@@ -37,6 +37,8 @@ export interface Snapshot {
   micLevel: number;
   speechActive: boolean;
   tracking: boolean;
+  visionReady: boolean;
+  visionError: string | null;
   cameraOn: boolean;
   transcript: string;
   interim: string;
@@ -132,6 +134,9 @@ export class SessionEngine {
   private delays: number[] = [];
   private visionMs: number | null = null;
   private visionBusy = false;
+  private visionReady = false;
+  private visionError: string | null = null;
+  private visionStamp = 0;
   private visionId = 0;
   private visionTimer = 0;
   private uiTimer = 0;
@@ -194,6 +199,8 @@ export class SessionEngine {
       micLevel: this.micLevel,
       speechActive: this.speechActive,
       tracking: this.tracking,
+      visionReady: this.visionReady,
+      visionError: this.visionError,
       cameraOn: Boolean(this.stream?.getVideoTracks().some((track) => track.readyState === "live")),
       transcript: this.finalTranscript,
       interim: this.interim,
@@ -273,6 +280,10 @@ export class SessionEngine {
     if (this.running || this.status === "starting") return;
     this.status = "starting";
     this.error = null;
+    this.visionReady = false;
+    this.visionError = null;
+    this.visionStamp = 0;
+    this.tracking = false;
     this.publish();
     try {
       this.stream = await this.openStream();
@@ -431,11 +442,15 @@ export class SessionEngine {
 
   private startVision(): void {
     if (!this.stream?.getVideoTracks().length) return;
-    this.worker = new Worker(new URL("./workers/vision.worker.ts", import.meta.url), { type: "module" });
+    // MediaPipe loads its runtime with importScripts. Module workers have no importScripts and no document, so the model never starts.
+    this.worker = new Worker(new URL("./workers/vision.worker.ts", import.meta.url));
     this.worker.onmessage = (event: MessageEvent) => this.onVisionMessage(event.data);
     this.worker.onerror = () => {
       this.visionBusy = false;
       this.tracking = false;
+      this.visionReady = false;
+      this.visionError = "Face tracking could not start. The camera is on, but the face model did not load.";
+      this.publish();
     };
     this.worker.postMessage({ type: "init" });
     const tick = () => {
@@ -453,7 +468,10 @@ export class SessionEngine {
     try {
       const bitmap = await createImageBitmap(this.video);
       const id = ++this.visionId;
-      this.worker.postMessage({ type: "frame", id, bitmap, timestamp: performance.now(), stamp: this.audioNow() }, [bitmap]);
+      let timestamp = Math.round(performance.now());
+      if (timestamp <= this.visionStamp) timestamp = this.visionStamp + 1;
+      this.visionStamp = timestamp;
+      this.worker.postMessage({ type: "frame", id, bitmap, timestamp, stamp: this.audioNow() }, [bitmap]);
       this.visionMs = performance.now() - started;
     } catch {
       this.visionBusy = false;
@@ -462,8 +480,18 @@ export class SessionEngine {
 
   private onVisionMessage(data: { type: string; id?: number; face?: FaceMessage | null; message?: string }): void {
     this.visionBusy = false;
+    if (data.type === "ready") {
+      this.visionReady = true;
+      this.visionError = null;
+      this.publish();
+      return;
+    }
     if (data.type === "error") {
       this.tracking = false;
+      if (!this.visionReady) {
+        this.visionError = "Face tracking could not start. The camera is on, but the face model did not load.";
+      }
+      this.publish();
       return;
     }
     if (data.type !== "result") return;
@@ -668,6 +696,9 @@ export class SessionEngine {
     this.micLevel = 0;
     this.speechActive = false;
     this.tracking = false;
+    this.visionReady = false;
+    this.visionError = null;
+    this.visionStamp = 0;
     this.relation = "Traces will appear once you start.";
   }
 }

@@ -10,9 +10,20 @@ const scope = self as unknown as {
 };
 
 let landmarker: FaceLandmarker | null = null;
+let loading: Promise<FaceLandmarker> | null = null;
 
-async function createLandmarker(): Promise<FaceLandmarker> {
-  if (landmarker) return landmarker;
+function createLandmarker(): Promise<FaceLandmarker> {
+  if (landmarker) return Promise.resolve(landmarker);
+  if (!loading) {
+    loading = loadLandmarker().catch((error: unknown) => {
+      loading = null;
+      throw error;
+    });
+  }
+  return loading;
+}
+
+async function loadLandmarker(): Promise<FaceLandmarker> {
   const vision = await FilesetResolver.forVisionTasks(WASM);
   const options = {
     baseOptions: { modelAssetPath: MODEL },
@@ -44,25 +55,29 @@ scope.onmessage = async (event: MessageEvent) => {
       return;
     }
     if (data.type === "frame" && data.bitmap && data.id !== undefined && data.timestamp !== undefined) {
-      const marker = await createLandmarker();
-      const result = marker.detectForVideo(data.bitmap, data.timestamp);
-      data.bitmap.close();
-      const landmarks = result.faceLandmarks?.[0];
-      if (!landmarks) {
-        scope.postMessage({ type: "result", id: data.id, face: null });
-        return;
+      const bitmap = data.bitmap;
+      try {
+        const marker = await createLandmarker();
+        const result = marker.detectForVideo(bitmap, data.timestamp);
+        const landmarks = result.faceLandmarks?.[0];
+        if (!landmarks) {
+          scope.postMessage({ type: "result", id: data.id, face: null });
+          return;
+        }
+        const categories = result.faceBlendshapes?.[0]?.categories ?? [];
+        const matrix = result.facialTransformationMatrixes?.[0]?.data;
+        scope.postMessage({
+          type: "result",
+          id: data.id,
+          face: {
+            landmarks: landmarks.map((point) => [point.x, point.y, point.z ?? 0]),
+            blendshapes: Object.fromEntries(categories.map((item) => [item.categoryName ?? "", item.score ?? 0])),
+            matrix: matrix ? Array.from(matrix) : null,
+          },
+        });
+      } finally {
+        bitmap.close();
       }
-      const categories = result.faceBlendshapes?.[0]?.categories ?? [];
-      const matrix = result.facialTransformationMatrixes?.[0]?.data;
-      scope.postMessage({
-        type: "result",
-        id: data.id,
-        face: {
-          landmarks: landmarks.map((point) => [point.x, point.y, point.z ?? 0]),
-          blendshapes: Object.fromEntries(categories.map((item) => [item.categoryName ?? "", item.score ?? 0])),
-          matrix: matrix ? Array.from(matrix) : null,
-        },
-      });
     }
   } catch (error) {
     scope.postMessage({

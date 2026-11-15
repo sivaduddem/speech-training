@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { SessionEngine, Snapshot } from "./engine";
+import { SCRIPTS } from "./lib/scripts";
 import { formatClock, type FeedbackMode } from "./types";
 
 const MODES: { id: FeedbackMode; title: string; body: string }[] = [
@@ -38,6 +39,8 @@ export function LiveView({
   const videoRef = useRef<HTMLVideoElement>(null);
   const meshRef = useRef<HTMLCanvasElement>(null);
   const chartRef = useRef<HTMLCanvasElement>(null);
+  const [scriptId, setScriptId] = useState<string | null>(null);
+  const script = SCRIPTS.find((item) => item.id === scriptId) ?? null;
 
   useEffect(() => {
     if (videoRef.current && meshRef.current && chartRef.current) {
@@ -59,7 +62,13 @@ export function LiveView({
           </div>
           {snap.status === "idle" && <p className="stage-hint">The preview starts when you do.</p>}
           {live && !snap.cameraOn && <p className="stage-hint">Camera is off, so silent blocks stay grouped with pauses.</p>}
-          {live && snap.cameraOn && !snap.tracking && <p className="stage-hint">Looking for a face in the frame.</p>}
+          {live && snap.cameraOn && snap.visionError && <p className="stage-hint">{snap.visionError}</p>}
+          {live && snap.cameraOn && !snap.visionReady && !snap.visionError && (
+            <p className="stage-hint">Starting face tracking.</p>
+          )}
+          {live && snap.cameraOn && snap.visionReady && !snap.tracking && (
+            <p className="stage-hint">Looking for a face in the frame.</p>
+          )}
           <div className="presence" data-on={snap.speechActive ? "yes" : "no"}>
             <span />
             {snap.speechActive ? "Speech in the microphone" : "Quiet"}
@@ -89,6 +98,24 @@ export function LiveView({
           <strong className="clock">{formatClock(snap.elapsed)}</strong>
         </div>
         {snap.error && <p className="banner">{snap.error}</p>}
+        <section className="scripts" aria-label="Something to read">
+          <h2>Something to read</h2>
+          <p className="fine">Optional. Pick a short passage if you want words in front of you. You can also just talk.</p>
+          <div className="script-picks">
+            {SCRIPTS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={scriptId === item.id ? "on" : ""}
+                aria-pressed={scriptId === item.id}
+                onClick={() => setScriptId((current) => (current === item.id ? null : item.id))}
+              >
+                {item.title}
+              </button>
+            ))}
+          </div>
+          {script && <p className="script">{script.body}</p>}
+        </section>
         <canvas ref={chartRef} className="charts" />
         <p className="relation">{snap.relation}</p>
         <p className="fine">
