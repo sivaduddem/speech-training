@@ -43,6 +43,7 @@ export interface Snapshot {
   cameraOn: boolean;
   transcript: string;
   interim: string;
+  readingSpoken: string;
   events: SpeechEvent[];
   reminder: string | null;
   showMarkers: boolean;
@@ -119,6 +120,8 @@ export class SessionEngine {
   private videoOkFrames = 0;
   private finalTranscript = "";
   private interim = "";
+  private readingIgnore = "";
+  private readingFollow = false;
   private liveCues: LinguisticCue[] = [];
   private interimCues: LinguisticCue[] = [];
   private applied = new Set<string>();
@@ -199,6 +202,7 @@ export class SessionEngine {
       cameraOn: Boolean(this.previewStream?.getVideoTracks().some((track) => track.readyState === "live")),
       transcript: this.finalTranscript,
       interim: this.interim,
+      readingSpoken: this.readingSpoken(),
       events: this.detector.events.map((event) => ({ ...event, evidence: [...event.evidence] })),
       reminder: this.reminderVisible ? this.reminderShown : null,
       showMarkers: message.showMarkers,
@@ -284,6 +288,19 @@ export class SessionEngine {
     this.publish();
   }
 
+  /** Ignore speech from before this call, so a passage can start at the first word. */
+  markReading(): void {
+    this.readingIgnore = `${this.finalTranscript} ${this.interim}`.trim();
+    this.publish();
+  }
+
+  /** Listen for words when a passage is open, including before a session starts. */
+  followReading(active: boolean): void {
+    this.readingFollow = active;
+    if (active) this.startRecognition();
+    else if (!this.running) this.stopRecognition();
+  }
+
   async start(): Promise<void> {
     if (this.running || this.status === "starting") return;
     this.status = "starting";
@@ -322,12 +339,8 @@ export class SessionEngine {
       this.running = false;
       this.error = error instanceof Error ? friendlyMediaError(error) : "The microphone could not start.";
       window.clearInterval(this.uiTimer);
-      try {
-        this.recognition?.stop();
-      } catch {
-        /* recognition may already be stopped */
-      }
-      this.recognition = null;
+      this.stopRecognition();
+      if (this.readingFollow) this.startRecognition();
       await this.audioContext?.close().catch(() => undefined);
       this.audioContext = null;
       this.releaseAudio();
@@ -343,12 +356,7 @@ export class SessionEngine {
     const elapsed = this.audioNow();
     for (const event of this.detector.events) event.state = "final";
     const recording = await this.finishRecording();
-    try {
-      this.recognition?.stop();
-    } catch {
-      /* already stopped */
-    }
-    this.recognition = null;
+    this.stopRecognition();
     await this.audioContext?.close().catch(() => undefined);
     this.audioContext = null;
     this.releaseAudio();
@@ -510,6 +518,7 @@ export class SessionEngine {
   }
 
   private startRecognition(): void {
+    if (this.recognition) return;
     const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
     this.recognitionSupported = Boolean(Ctor);
     if (!Ctor) return;
@@ -520,7 +529,8 @@ export class SessionEngine {
     recognition.onresult = (event) => this.onTranscript(event);
     recognition.onerror = () => undefined;
     recognition.onend = () => {
-      if (!this.running) return;
+      if (this.recognition !== recognition) return;
+      if (!this.running && !this.readingFollow) return;
       try {
         recognition.start();
       } catch {
@@ -530,9 +540,30 @@ export class SessionEngine {
     try {
       recognition.start();
       this.recognition = recognition;
-    } catch {
-      this.recognitionSupported = false;
+    } catch (error) {
+      this.recognition = null;
+      const named = error instanceof DOMException ? error.name : "";
+      if (named !== "NotAllowedError" && named !== "InvalidStateError") this.recognitionSupported = false;
     }
+  }
+
+  private stopRecognition(): void {
+    const recognition = this.recognition;
+    this.recognition = null;
+    try {
+      recognition?.stop();
+    } catch {
+      /* already stopped */
+    }
+  }
+
+  private readingSpoken(): string {
+    const heard = `${this.finalTranscript} ${this.interim}`.trim();
+    if (this.readingIgnore && heard.startsWith(this.readingIgnore)) return heard.slice(this.readingIgnore.length).trim();
+    if (this.readingIgnore && this.finalTranscript.startsWith(this.readingIgnore)) {
+      return `${this.finalTranscript.slice(this.readingIgnore.length)} ${this.interim}`.trim();
+    }
+    return heard;
   }
 
   private onAudio(samples: Float32Array, sampleRate: number): void {
@@ -651,6 +682,7 @@ export class SessionEngine {
       this.interimCues = interim.trim() ? findLinguisticEvents(interim, start, Math.max(now, start + 0.3)) : [];
     }
     if ((finals + interim).trim()) this.lastGrowth = now;
+    this.publish();
   }
 
   private paint(): void {
@@ -688,6 +720,7 @@ export class SessionEngine {
     this.videoOkFrames = 0;
     this.finalTranscript = "";
     this.interim = "";
+    this.readingIgnore = "";
     this.liveCues = [];
     this.interimCues = [];
     this.applied.clear();

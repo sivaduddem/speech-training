@@ -67,7 +67,7 @@ export function App() {
         {snap.status === "live" && page !== "live" && <p className="listening">A session is still running.</p>}
       </header>
       <div className={page === "live" ? "" : "parked"}>
-        <LiveView engine={engine} snap={snap} onStopped={() => setPage("review")} />
+        <LiveView engine={engine} snap={snap} shown={page === "live"} onStopped={() => setPage("review")} />
       </div>
       {page === "review" && <ReviewView />}
       {page === "insights" && <InsightsView engine={engine} snap={snap} />}

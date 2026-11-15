@@ -103,6 +103,49 @@ nav button[aria-current="page"] { background: var(--paper); border-color: var(--
 .stage-media video { background: #0d0b0a; }
 .mesh { pointer-events: none; background: transparent; }
 
+.prompter {
+  position: absolute;
+  z-index: 3;
+  left: 0.7rem;
+  right: 0.7rem;
+  top: 0.7rem;
+  max-height: 58%;
+  overflow: auto;
+  padding: 0.75rem 0.9rem 0.9rem;
+  border-radius: 16px;
+  background: rgba(12, 10, 8, 0.88);
+}
+.prompter-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.prompter-nav span { color: var(--muted); font-size: 0.85rem; }
+.prompter-nav button { padding: 0.35rem 0.75rem; }
+.prompter-current {
+  margin: 0.7rem 0 0.45rem;
+  font-size: 1.55rem;
+  line-height: 1.4;
+}
+.prompter-upcoming {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0.15rem 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+  font-size: 1.15rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.prompter-upcoming:hover { border-color: transparent; }
+.prompter .said { color: rgba(244, 236, 223, 0.38); }
+.prompter .now { color: var(--amber); font-weight: 650; }
+.prompter .next { color: var(--ink); }
+.prompter .ahead { color: var(--muted); }
 .stage-hint, .presence {
   position: absolute;
   z-index: 2;
@@ -152,14 +195,6 @@ nav button[aria-current="page"] { background: var(--paper); border-color: var(--
 .scripts h2 { margin-bottom: 0.35rem; }
 .script-picks { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.7rem; }
 .script-picks button { padding: 0.4rem 0.85rem; font-size: 0.92rem; }
-.script {
-  margin: 0.8rem 0 0;
-  padding: 1rem 1.1rem;
-  background: var(--bg-2);
-  border-radius: 16px;
-  font-size: 1.12rem;
-  line-height: 1.65;
-}
 .charts { width: 100%; height: 240px; margin-top: 0.8rem; background: var(--bg-2); border-radius: 16px; }
 .relation { margin-bottom: 0.2rem; }
 .fine, .relation { color: var(--muted); }
