@@ -1,0 +1,27 @@
+[project]
+name = "speech-companion"
+version = "0.1.0"
+description = "Streaming multimodal speech companion inspired by MMSD-Net"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "torch>=2.2",
+  "fastapi>=0.115",
+  "uvicorn>=0.32",
+  "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+wav2vec = ["transformers>=4.44", "soundfile>=0.12"]
+dev = ["pytest>=8.0", "httpx>=0.27"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
