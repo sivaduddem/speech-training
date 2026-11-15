@@ -13,7 +13,7 @@ const MIN_DURATION: Record<EventType, number> = {
   prolongation: 0.45,
   block: 0.28,
   restart: 0.2,
-  pause: 0.35,
+  pause: 0.75,
 };
 
 interface Part {
@@ -79,18 +79,10 @@ function scoresFor(state: DetState, frame: Frame): Record<EventType, { score: nu
   state.sustain = steady ? state.sustain + 1 : Math.max(0, state.sustain - 2);
   const prolongAudio = state.sustain >= 10 ? flat * Math.min(1, state.sustain / 10) : 0;
 
-  const held =
-    frame.videoPresent &&
-    quiet &&
-    frame.lipVelocity < 0.05 &&
-    frame.landmarkMotion < 0.05 &&
-    (frame.lipCompression > 0.5 || frame.jawOpen > 0.4 || frame.lipAperture > 0.32);
-  const relaxed =
-    frame.videoPresent &&
-    frame.lipCompression < 0.28 &&
-    frame.jawOpen < 0.22 &&
-    frame.lipAperture < 0.24 &&
-    frame.landmarkMotion < 0.06;
+  const still = frame.videoPresent && frame.lipVelocity < 0.12 && frame.landmarkMotion < 0.1;
+  const resting =
+    still && frame.lipCompression < 0.18 && frame.jawOpen < 0.14 && frame.lipAperture < 0.18;
+  const held = still && quiet && state.recentSpeech > 0.35 && !resting;
 
   const repetitionAudio = frame.autocorr > 0.45 && speaking ? frame.autocorr : 0;
   const raw = {
@@ -148,7 +140,7 @@ function scoresFor(state: DetState, frame: Frame): Record<EventType, { score: nu
         evidence: "A quiet stretch",
       },
       {
-        value: relaxed && quiet ? 0.85 : 0,
+        value: resting && quiet ? 0.85 : 0,
         weight: 1.3,
         available: frame.videoPresent,
         evidence: "The mouth looks at rest during the quiet",

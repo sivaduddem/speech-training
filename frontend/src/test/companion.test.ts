@@ -89,6 +89,48 @@ describe("detector", () => {
     expect(events.some((event) => event.type === "pause")).toBe(false);
   });
 
+  it("uses a still, non-resting mouth as a block even when the shape is moderate", () => {
+    const frames = [
+      ...sequence(20, (t) => speech(t)),
+      ...sequence(16, (t) =>
+        frame({
+          t: 1 + t,
+          rms: 0.004,
+          voiced: 0,
+          lipAperture: 0.22,
+          jawOpen: 0.2,
+          lipCompression: 0.16,
+          lipVelocity: 0.02,
+          landmarkMotion: 0.03,
+          videoPresent: true,
+        }),
+      ),
+    ];
+    const events = runDetector(frames);
+    expect(events.some((event) => event.type === "block")).toBe(true);
+    expect(events.some((event) => event.type === "pause")).toBe(false);
+  });
+
+  it("does not keep a short gap as a pause", () => {
+    const frames = [
+      ...sequence(20, (t) => speech(t)),
+      ...sequence(8, (t) =>
+        frame({
+          t: 1 + t,
+          rms: 0.004,
+          voiced: 0,
+          lipAperture: 0.1,
+          jawOpen: 0.05,
+          lipCompression: 0.05,
+          lipVelocity: 0.01,
+          landmarkMotion: 0.01,
+        }),
+      ),
+      ...sequence(8, (t) => speech(1.4 + t)),
+    ];
+    expect(runDetector(frames).some((event) => event.type === "pause")).toBe(false);
+  });
+
   it("keeps a resting silence as a pause", () => {
     const frames = [
       ...sequence(20, (t) => speech(t)),
