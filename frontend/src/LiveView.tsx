@@ -49,6 +49,16 @@ export function LiveView({
   }, [engine]);
 
   const live = snap.status === "live" || snap.status === "starting";
+  const readyToStart = snap.visionReady && snap.cameraOn;
+  const modelLabel = snap.visionError
+    ? snap.visionError
+    : !snap.visionReady
+      ? "Loading the face model."
+      : !snap.cameraOn
+        ? "Face model ready. Turning the camera on."
+        : snap.tracking
+          ? "Face model ready."
+          : "Face model ready. Looking for a face.";
   const pauses = snap.events.filter((event) => event.type === "pause");
   const marked = snap.events.filter((event) => event.type !== "pause");
 
@@ -60,25 +70,30 @@ export function LiveView({
             <video ref={videoRef} playsInline muted />
             <canvas ref={meshRef} className="mesh" />
           </div>
-          {snap.status === "idle" && <p className="stage-hint">The preview starts when you do.</p>}
+          {!live && !snap.cameraOn && !snap.error && <p className="stage-hint">Turning the camera on.</p>}
           {live && !snap.cameraOn && <p className="stage-hint">Camera is off, so silent blocks stay grouped with pauses.</p>}
-          {live && snap.cameraOn && snap.visionError && <p className="stage-hint">{snap.visionError}</p>}
-          {live && snap.cameraOn && !snap.visionReady && !snap.visionError && (
-            <p className="stage-hint">Starting face tracking.</p>
+          {live && (
+            <div className="presence" data-on={snap.speechActive ? "yes" : "no"}>
+              <span />
+              {snap.speechActive ? "Speech in the microphone" : "Quiet"}
+            </div>
           )}
-          {live && snap.cameraOn && snap.visionReady && !snap.tracking && (
-            <p className="stage-hint">Looking for a face in the frame.</p>
+        </div>
+        <div className="readiness">
+          <p className="model-status" data-state={snap.visionError ? "error" : readyToStart ? "ready" : "loading"}>
+            {modelLabel}
+          </p>
+          {snap.visionError && (
+            <button type="button" onClick={() => engine.reloadFaceModel()}>
+              Try the face model again
+            </button>
           )}
-          <div className="presence" data-on={snap.speechActive ? "yes" : "no"}>
-            <span />
-            {snap.speechActive ? "Speech in the microphone" : "Quiet"}
-          </div>
         </div>
         <div className="transport">
           <button
             className="primary"
             type="button"
-            disabled={snap.status === "starting"}
+            disabled={snap.status === "starting" || (!live && !readyToStart)}
             onClick={() => {
               if (live) {
                 void engine.stop().then(() => onStopped());

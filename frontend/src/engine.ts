@@ -26,6 +26,7 @@ import { findLinguisticEvents, type LinguisticCue } from "./lib/linguistic";
 import { drawMesh } from "./lib/mesh";
 import { type ResearchFrame } from "./lib/researchSchema";
 import { saveSession, type StoredSession } from "./lib/storage";
+import { detectFace, loadFaceLandmarker, type VisionFace } from "./lib/vision";
 import type { FeatureSample, FeedbackMode, SpeechEvent } from "./types";
 
 export interface Snapshot {
@@ -70,12 +71,6 @@ interface FaceNow {
   poseSpeed: number;
 }
 
-interface FaceMessage {
-  landmarks: number[][];
-  blendshapes: Record<string, number>;
-  matrix: number[] | null;
-}
-
 const MODES: FeedbackMode[] = ["quiet", "gentle", "reminders"];
 
 function pref(key: string, fallback: string): string {
@@ -100,11 +95,12 @@ export class SessionEngine {
   private mesh: HTMLCanvasElement | null = null;
   private chart: HTMLCanvasElement | null = null;
   private stream: MediaStream | null = null;
+  private previewStream: MediaStream | null = null;
+  private audioStream: MediaStream | null = null;
   private audioContext: AudioContext | null = null;
   private recorder: MediaRecorder | null = null;
   private chunks: Blob[] = [];
   private recognition: SpeechRecognitionLike | null = null;
-  private worker: Worker | null = null;
   private detector: DetState = emptyDetector();
   private samplesSeen = 0;
   private sampleRate = 48000;
@@ -133,12 +129,11 @@ export class SessionEngine {
   private seenEvents = new Set<number>();
   private delays: number[] = [];
   private visionMs: number | null = null;
-  private visionBusy = false;
   private visionReady = false;
   private visionError: string | null = null;
   private visionStamp = 0;
-  private visionId = 0;
   private visionTimer = 0;
+  private previewStarted = false;
   private uiTimer = 0;
   private startedWall = 0;
   private running = false;
@@ -201,7 +196,7 @@ export class SessionEngine {
       tracking: this.tracking,
       visionReady: this.visionReady,
       visionError: this.visionError,
-      cameraOn: Boolean(this.stream?.getVideoTracks().some((track) => track.readyState === "live")),
+      cameraOn: Boolean(this.previewStream?.getVideoTracks().some((track) => track.readyState === "live")),
       transcript: this.finalTranscript,
       interim: this.interim,
       events: this.detector.events.map((event) => ({ ...event, evidence: [...event.evidence] })),
@@ -233,6 +228,19 @@ export class SessionEngine {
     this.video = elements.video;
     this.mesh = elements.mesh;
     this.chart = elements.chart;
+    if (this.previewStream && this.video.srcObject !== this.previewStream) {
+      this.video.srcObject = this.previewStream;
+      this.video.muted = true;
+      void this.video.play().catch(() => undefined);
+    }
+    this.ensurePreview();
+  }
+
+  reloadFaceModel(): void {
+    this.visionReady = false;
+    this.visionError = null;
+    this.publish();
+    void this.loadModel();
   }
 
   setMode(mode: FeedbackMode): void {
@@ -280,17 +288,15 @@ export class SessionEngine {
     if (this.running || this.status === "starting") return;
     this.status = "starting";
     this.error = null;
-    this.visionReady = false;
-    this.visionError = null;
-    this.visionStamp = 0;
-    this.tracking = false;
     this.publish();
     try {
-      this.stream = await this.openStream();
-      if (!this.video) throw new Error("The preview is not on screen yet.");
-      this.video.srcObject = this.stream;
-      this.video.muted = true;
-      await this.video.play();
+      if (!this.previewStream) await this.openCamera();
+      const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 };
+      this.audioStream = await navigator.mediaDevices.getUserMedia({ audio });
+      this.stream = new MediaStream([
+        ...(this.previewStream?.getVideoTracks() ?? []),
+        ...this.audioStream.getAudioTracks(),
+      ]);
       this.audioContext = new AudioContext();
       await this.audioContext.resume();
       await this.audioContext.audioWorklet.addModule("/worklets/capture.js");
@@ -309,18 +315,13 @@ export class SessionEngine {
       };
       this.startRecorder();
       this.startRecognition();
-      this.startVision();
       this.status = "live";
       this.uiTimer = window.setInterval(() => this.publish(), 160);
       this.publish();
     } catch (error) {
       this.running = false;
-      this.status = "error";
       this.error = error instanceof Error ? friendlyMediaError(error) : "The microphone could not start.";
       window.clearInterval(this.uiTimer);
-      window.clearTimeout(this.visionTimer);
-      this.worker?.terminate();
-      this.worker = null;
       try {
         this.recognition?.stop();
       } catch {
@@ -329,7 +330,8 @@ export class SessionEngine {
       this.recognition = null;
       await this.audioContext?.close().catch(() => undefined);
       this.audioContext = null;
-      this.releaseTracks();
+      this.releaseAudio();
+      this.status = "idle";
       this.publish();
     }
   }
@@ -338,7 +340,6 @@ export class SessionEngine {
     if (!this.running && this.status !== "live") return null;
     this.running = false;
     window.clearInterval(this.uiTimer);
-    window.clearTimeout(this.visionTimer);
     const elapsed = this.audioNow();
     for (const event of this.detector.events) event.state = "final";
     const recording = await this.finishRecording();
@@ -348,11 +349,9 @@ export class SessionEngine {
       /* already stopped */
     }
     this.recognition = null;
-    this.worker?.terminate();
-    this.worker = null;
     await this.audioContext?.close().catch(() => undefined);
     this.audioContext = null;
-    this.releaseTracks();
+    this.releaseAudio();
     const session: StoredSession = {
       id: `${this.startedWall || Date.now()}`,
       startedAt: this.startedWall || Date.now(),
@@ -376,16 +375,112 @@ export class SessionEngine {
     return saved;
   }
 
-  private async openStream(): Promise<MediaStream> {
-    const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 };
+  private ensurePreview(): void {
+    if (this.previewStarted) return;
+    this.previewStarted = true;
+    void this.openCamera();
+    void this.loadModel();
+  }
+
+  private async openCamera(): Promise<void> {
     try {
-      return await navigator.mediaDevices.getUserMedia({
-        audio,
+      this.previewStream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
       });
-    } catch {
-      return navigator.mediaDevices.getUserMedia({ audio });
+      if (this.video) {
+        this.video.srcObject = this.previewStream;
+        this.video.muted = true;
+        await this.video.play();
+      }
+      this.kickVision();
+      this.publish();
+    } catch (error) {
+      this.error = error instanceof Error ? friendlyMediaError(error) : "The camera could not start.";
+      this.publish();
     }
+  }
+
+  private async loadModel(): Promise<void> {
+    try {
+      await loadFaceLandmarker();
+      this.visionReady = true;
+      this.visionError = null;
+      this.kickVision();
+      this.publish();
+    } catch (error) {
+      this.visionReady = false;
+      this.visionError =
+        error instanceof Error && error.message
+          ? error.message
+          : "The face model did not load. This page needs cdn.jsdelivr.net and storage.googleapis.com.";
+      this.publish();
+    }
+  }
+
+  private kickVision(): void {
+    if (this.visionTimer) return;
+    const tick = () => {
+      this.visionTimer = window.setTimeout(tick, 80);
+      this.readFace();
+    };
+    this.visionTimer = window.setTimeout(tick, 40);
+  }
+
+  private readFace(): void {
+    if (!this.visionReady || !this.video) return;
+    const started = performance.now();
+    let timestamp = Math.round(performance.now());
+    if (timestamp <= this.visionStamp) timestamp = this.visionStamp + 1;
+    this.visionStamp = timestamp;
+    try {
+      const face = detectFace(this.video, timestamp);
+      this.visionMs = performance.now() - started;
+      this.applyFace(face);
+    } catch {
+      this.tracking = false;
+      this.landmarks = null;
+      this.paint();
+    }
+  }
+
+  private applyFace(face: VisionFace | null): void {
+    const wasTracking = this.tracking;
+    const stamp = this.running ? this.audioNow() : 0;
+    if (!face) {
+      this.tracking = false;
+      this.landmarks = null;
+      this.faceNow = null;
+      this.paint();
+      if (wasTracking) this.publish();
+      return;
+    }
+    const landmarks = face.landmarks.map(([x, y, z]) => ({ x, y, z }));
+    const measured = measureLipMotion(landmarks, this.motion);
+    this.motion = measured.state;
+    const aperture = lipAperture(landmarks);
+    const pose = poseFromMatrix(face.matrix, landmarks[33] ?? { x: 0, y: 0 }, landmarks[263] ?? { x: 1, y: 0 });
+    const dt = this.lastFaceStamp ? Math.max(0.04, stamp - this.lastFaceStamp) : 0.07;
+    const lipVelocity = this.lastAperture === null ? 0 : Math.abs(aperture - this.lastAperture) / dt;
+    const poseSpeed = this.lastPose
+      ? Math.hypot(pose.yaw - this.lastPose.yaw, pose.pitch - this.lastPose.pitch, pose.roll - this.lastPose.roll) / dt
+      : 0;
+    this.lastAperture = aperture;
+    this.lastPose = pose;
+    this.lastFaceStamp = stamp;
+    this.tracking = true;
+    this.landmarks = landmarks;
+    this.faceNow = {
+      stamp,
+      aperture,
+      jaw: jawOpening(face.blendshapes),
+      compression: lipCompressionShape(face.blendshapes),
+      width: mouthWidth(landmarks),
+      lipVelocity,
+      landmarkMotion: measured.motion,
+      poseSpeed,
+    };
+    this.paint();
+    if (!wasTracking) this.publish();
   }
 
   private startRecorder(): void {
@@ -438,96 +533,6 @@ export class SessionEngine {
     } catch {
       this.recognitionSupported = false;
     }
-  }
-
-  private startVision(): void {
-    if (!this.stream?.getVideoTracks().length) return;
-    // MediaPipe loads its runtime with importScripts. Module workers have no importScripts and no document, so the model never starts.
-    this.worker = new Worker(new URL("./workers/vision.worker.ts", import.meta.url));
-    this.worker.onmessage = (event: MessageEvent) => this.onVisionMessage(event.data);
-    this.worker.onerror = () => {
-      this.visionBusy = false;
-      this.tracking = false;
-      this.visionReady = false;
-      this.visionError = "Face tracking could not start. The camera is on, but the face model did not load.";
-      this.publish();
-    };
-    this.worker.postMessage({ type: "init" });
-    const tick = () => {
-      if (!this.running) return;
-      this.visionTimer = window.setTimeout(tick, 70);
-      void this.sendFrame();
-    };
-    this.visionTimer = window.setTimeout(tick, 200);
-  }
-
-  private async sendFrame(): Promise<void> {
-    if (this.visionBusy || !this.video || this.video.readyState < 2 || !this.worker) return;
-    this.visionBusy = true;
-    const started = performance.now();
-    try {
-      const bitmap = await createImageBitmap(this.video);
-      const id = ++this.visionId;
-      let timestamp = Math.round(performance.now());
-      if (timestamp <= this.visionStamp) timestamp = this.visionStamp + 1;
-      this.visionStamp = timestamp;
-      this.worker.postMessage({ type: "frame", id, bitmap, timestamp, stamp: this.audioNow() }, [bitmap]);
-      this.visionMs = performance.now() - started;
-    } catch {
-      this.visionBusy = false;
-    }
-  }
-
-  private onVisionMessage(data: { type: string; id?: number; face?: FaceMessage | null; message?: string }): void {
-    this.visionBusy = false;
-    if (data.type === "ready") {
-      this.visionReady = true;
-      this.visionError = null;
-      this.publish();
-      return;
-    }
-    if (data.type === "error") {
-      this.tracking = false;
-      if (!this.visionReady) {
-        this.visionError = "Face tracking could not start. The camera is on, but the face model did not load.";
-      }
-      this.publish();
-      return;
-    }
-    if (data.type !== "result") return;
-    const stamp = this.audioNow();
-    if (!data.face) {
-      this.tracking = false;
-      this.landmarks = null;
-      this.paint();
-      return;
-    }
-    const landmarks = data.face.landmarks.map(([x, y, z]) => ({ x, y, z }));
-    const measured = measureLipMotion(landmarks, this.motion);
-    this.motion = measured.state;
-    const aperture = lipAperture(landmarks);
-    const pose = poseFromMatrix(data.face.matrix, landmarks[33] ?? { x: 0, y: 0 }, landmarks[263] ?? { x: 1, y: 0 });
-    const dt = this.lastFaceStamp ? Math.max(0.04, stamp - this.lastFaceStamp) : 0.07;
-    const lipVelocity = this.lastAperture === null ? 0 : Math.abs(aperture - this.lastAperture) / dt;
-    const poseSpeed = this.lastPose
-      ? Math.hypot(pose.yaw - this.lastPose.yaw, pose.pitch - this.lastPose.pitch, pose.roll - this.lastPose.roll) / dt
-      : 0;
-    this.lastAperture = aperture;
-    this.lastPose = pose;
-    this.lastFaceStamp = stamp;
-    this.tracking = true;
-    this.landmarks = landmarks;
-    this.faceNow = {
-      stamp,
-      aperture,
-      jaw: jawOpening(data.face.blendshapes),
-      compression: lipCompressionShape(data.face.blendshapes),
-      width: mouthWidth(landmarks),
-      lipVelocity,
-      landmarkMotion: measured.motion,
-      poseSpeed,
-    };
-    this.paint();
   }
 
   private onAudio(samples: Float32Array, sampleRate: number): void {
@@ -666,10 +671,10 @@ export class SessionEngine {
     for (const listener of this.listeners) listener(snapshot);
   }
 
-  private releaseTracks(): void {
-    this.stream?.getTracks().forEach((track) => track.stop());
+  private releaseAudio(): void {
+    this.audioStream?.getTracks().forEach((track) => track.stop());
+    this.audioStream = null;
     this.stream = null;
-    if (this.video) this.video.srcObject = null;
   }
 
   private resetBuffers(): void {
@@ -695,10 +700,6 @@ export class SessionEngine {
     this.reminderVisible = false;
     this.micLevel = 0;
     this.speechActive = false;
-    this.tracking = false;
-    this.visionReady = false;
-    this.visionError = null;
-    this.visionStamp = 0;
     this.relation = "Traces will appear once you start.";
   }
 }
@@ -711,6 +712,6 @@ function median(values: number[]): number | null {
 
 function friendlyMediaError(error: Error): string {
   if (error.name === "NotAllowedError") return "The browser did not get permission to use the microphone or camera.";
-  if (error.name === "NotFoundError") return "No microphone was found.";
+  if (error.name === "NotFoundError") return "No camera or microphone was found.";
   return error.message || "The microphone could not start.";
 }

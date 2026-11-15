@@ -133,7 +133,17 @@ nav button[aria-current="page"] { background: var(--paper); border-color: var(--
 }
 .presence[data-on="yes"] span { background: var(--sage); }
 
-.transport { margin-top: 0.9rem; }
+.readiness {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+  margin-top: 0.85rem;
+}
+.model-status { margin: 0; color: var(--muted); }
+.model-status[data-state="ready"] { color: var(--sage); }
+.model-status[data-state="error"] { color: var(--amber); }
+.transport { margin-top: 0.7rem; }
 .clock { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 500; }
 .meter { flex: 1; min-width: 80px; height: 6px; background: var(--line); border-radius: 999px; overflow: hidden; }
 .meter span { display: block; height: 100%; background: var(--sage); }
